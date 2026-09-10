@@ -1,204 +1,217 @@
 # Troubleshooting Notes
 
-## 1. Large Number of Sysmon Event ID 1 Results
-
-### Observation
-
-The unfiltered Sysmon Event ID 1 query returned many process-creation events.
-
-### Explanation
-
-Sysmon Event ID 1 records process creation across the system, so a large number of results is expected on an active Windows workstation.
-
-### Approach
-
-A targeted search was then performed using:
-
-`Compress-Archive|powershell.exe|staged-data.zip`
-
-This reduced the investigation to events that contained the relevant search terms.
-
-### DFIR Lesson
-
-Do not rely on an unfiltered process-creation list. Use timestamps, process names, command lines, users, and parent processes to narrow the investigation.
-
----
-
-## 2. Targeted Sysmon Event ID 1 Results Did Not Show Full Event Details
-
-### Observation
-
-The targeted query returned entries such as:
-
-`Process Create:...`
-
-instead of displaying the complete message.
-
-### Explanation
-
-The screenshot captured the query output in a truncated form.
-
-### Investigation Impact
-
-The result confirms that matching process-creation events were returned, but the available screenshot does not provide enough information to verify the exact command line, parent process, or process ID for each result.
-
-### DFIR Lesson
-
-Do not overstate truncated evidence. Record exactly what the available telemetry proves.
-
----
-
-## 3. Sysmon Event ID 11 Targeted Search Returned No Result
-
-### Observation
-
-The targeted query searched for:
-
-- `staged-data.zip`
-- `SuspiciousCompressionLab`
-
-No matching result was displayed.
-
-### Explanation
-
-The filesystem confirmed that the archive existed, but the provided Sysmon query output did not show a corresponding Event ID 11 record.
-
-### Conclusion
-
-The archive was confirmed through direct filesystem inspection, but Sysmon Event ID 11 evidence for the archive was not established.
-
-### DFIR Lesson
-
-A file can be confirmed without a corresponding telemetry event. The telemetry gap should be documented rather than converted into a claim that the file was never monitored.
-
----
-
-## 4. PowerShell Event ID 4104 Search Returned No Result
-
-### Observation
-
-The query searched for:
-
-`Compress-Archive|staged-data.zip|SuspiciousCompressionLab`
-
-No result was displayed.
-
-### Explanation
-
-The query did not identify a matching Script Block Logging event in the returned results.
-
-### Conclusion
-
-No matching 4104 event was established from the screenshot.
-
-This does not prove that PowerShell was not used.
-
----
-
-## 5. Security Event ID 4688 Search Returned No Result
-
-### Observation
-
-The query searched for:
-
-`powershell.exe|Compress-Archive`
-
-No matching event was displayed.
-
-### Conclusion
-
-Security 4688 did not provide supporting evidence in the provided screenshot set.
-
-### DFIR Lesson
-
-Different telemetry sources provide different visibility. The absence of an event in one source does not automatically invalidate evidence collected elsewhere.
-
----
-
-## 6. Many Sysmon Event ID 3 Network Connections
-
-### Observation
-
-The Sysmon Event ID 3 query returned numerous network connection events.
+## 1. Recursive Hashing Failed Because the Output File Was Included
 
 ### Problem
 
-The output did not provide sufficient process-level details to associate the displayed network traffic with the archive.
+The following command produced an error:
 
-### Correct Interpretation
+```powershell
+Get-ChildItem $Lab -Recurse -File |
+    Get-FileHash -Algorithm SHA256 |
+    Out-File "$Lab\Evidence\all-file-hashes.txt"
+```
 
-The host generated network activity during the investigation period.
+Error:
 
-The screenshots do not establish:
+```text
+Get-FileHash: The process cannot access the file
+'C:\DataCollectionUSBLab\Evidence\all-file-hashes.txt'
+because it is being used by another process.
+```
 
-- Archive transfer.
-- Destination of the archive.
-- Process responsible for the transfer.
-- Exfiltration.
+### Cause
 
-### DFIR Lesson
+The recursive `Get-ChildItem` command included `all-file-hashes.txt` itself.
 
-Network activity must be correlated with the responsible process and destination before it can be associated with suspected data staging or exfiltration.
+At the same time, `Out-File` was writing to that file.
 
----
+This created a file-access conflict.
 
-## 7. Archive Size Was Smaller Than the Combined Source Files
+### Corrected Command
 
-### Observation
+```powershell
+$HashFile = "$Lab\Evidence\all-file-hashes.txt"
 
-The source files totaled:
+Get-ChildItem $Lab -Recurse -File |
+    Where-Object { $_.FullName -ne $HashFile } |
+    Get-FileHash -Algorithm SHA256 |
+    Out-File $HashFile
+```
 
-26 + 26 + 24 = 76 bytes
+The output file is now excluded from the hash input.
 
-The resulting ZIP archive was:
-
-430 bytes
-
-### Explanation
-
-A ZIP archive contains archive structure and metadata in addition to the compressed file contents. Small input files may therefore produce an archive that is larger than their combined raw size.
-
-### DFIR Lesson
-
-Archive size alone should not be used to determine whether compression occurred successfully or whether an archive is suspicious.
-
----
-
-## 8. Archive Validation
+## 2. Large Number of Sysmon Event ID 11 Records
 
 ### Observation
 
-The archive was extracted successfully using `Expand-Archive`.
+The Sysmon Operational log contained approximately:
 
-### Result
+```text
+53,907 total events
+13,469 Event ID 11 events
+```
 
-The expected three files appeared in the extraction directory.
+### Interpretation
 
-### Conclusion
+A large Event ID 11 volume is normal on an active Windows system.
 
-The archive contents were validated successfully.
+File creation events can be generated by:
 
-### DFIR Lesson
+- PowerShell
+- Windows services
+- installers
+- browsers
+- temporary files
+- application activity
+- security software
 
-When investigating an archive, inspect the actual contents rather than inferring them from the filename.
+Therefore, Event ID 11 should be filtered by:
 
----
+- time range,
+- path,
+- process,
+- user,
+- ProcessGuid,
+- filename,
+- surrounding events.
 
-## 9. Cleanup
+## 3. PowerShell Policy-Test Files Created Noise
 
-The lab was removed with:
+### Observation
 
-`Remove-Item "C:\SuspiciousCompressionLab" -Recurse -Force`
+Sysmon Event ID 11 showed PowerShell creating files similar to:
 
-The cleanup was verified using:
+```text
+C:\Windows\SystemTemp\_PSScriptPolicyTest_0bquwsf24.om1.ps1
+```
 
-`Test-Path "C:\SuspiciousCompressionLab"`
+and:
 
-Result:
+```text
+C:\Windows\SystemTemp\__PSScriptPolicyTest_sccyllgi.h3i.ps1
+```
 
-`False`
+### Interpretation
 
-This confirms that the controlled test environment was removed after the investigation.
+These files were treated as PowerShell policy-test activity.
 
----
+They were not considered evidence of the controlled data-staging workflow.
+
+### Lesson
+
+An analyst should not classify a file as suspicious solely because:
+
+- PowerShell created it,
+- it has a `.ps1` extension,
+- it appears in Sysmon Event ID 11.
+
+Context and correlation are required.
+
+## 4. Event ID 11 Does Not Prove File Copying
+
+Sysmon Event ID 11 records file creation.
+
+It does not automatically prove:
+
+```text
+Source File
+    |
+    v
+File Copy
+    |
+    v
+Destination File
+```
+
+Hash comparison and filesystem metadata can strengthen the copy interpretation.
+
+Process correlation with Sysmon Event ID 1 can provide additional context.
+
+## 5. Process Correlation
+
+When investigating a suspicious file event, correlate:
+
+```text
+Event ID 11
+    |
+    +-- ProcessId
+    +-- ProcessGuid
+    +-- Image
+    +-- TargetFilename
+    +-- Timestamp
+          |
+          v
+Event ID 1
+    |
+    +-- Process creation
+    +-- Command line
+    +-- User
+```
+
+This provides a stronger process-to-file relationship.
+
+## 6. Timestamp Differences
+
+The staged files showed a CreationTime of:
+
+```text
+10-09-2026 08:29:40
+```
+
+while their LastWriteTime remained:
+
+```text
+10-09-2026 08:27:16
+```
+
+This is consistent with the files being created in the source directory first and later appearing in the staging directory.
+
+Timestamps should still be interpreted with caution because filesystem timestamps can change depending on how files are created, copied, moved, or modified.
+
+## 7. Archive Hash Is Different From Source File Hashes
+
+The archive has its own SHA256:
+
+```text
+EADD931C305972290CB8E8C799C47D0E2721E305BAAEC52A784F36EA1C8C1BA5
+```
+
+This hash represents the ZIP file as a complete artifact.
+
+It should not be compared directly with the hashes of the individual source files.
+
+The correct validation is:
+
+```text
+Source File Hash
+        =
+Staged File Hash
+```
+
+while the ZIP receives a separate hash.
+
+## 8. Archive Recreation Can Change the Archive Hash
+
+The archive was created with:
+
+```powershell
+Compress-Archive -Force
+```
+
+If the archive is recreated, its SHA256 may change even when the logical contents are similar.
+
+Therefore, record the archive hash after the final archive creation.
+
+## 9. Wazuh UTC Timestamp Interpretation
+
+Wazuh telemetry can expose Sysmon timestamps through fields such as:
+
+```text
+data.win.eventdata.utcTime
+```
+
+The analyst should distinguish UTC timestamps from local Windows display time when constructing the investigation timeline.
+
+A timestamp should not be converted or compared without first confirming its timezone.
 
